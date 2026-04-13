@@ -17,18 +17,47 @@ from .polygon_from_mask import compute_polygon_from_mask
 def get_bboxes_from_texts(
     session: OsamSession, image: np.ndarray, image_id: str, texts: list[str]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[NDArray[np.bool_]] | None]:
+    return get_bboxes_from_texts_with_mode(
+        session=session,
+        image=image,
+        image_id=image_id,
+        texts=texts,
+        query_per_text=False,
+    )
+
+
+def get_bboxes_from_texts_with_mode(
+    session: OsamSession,
+    image: np.ndarray,
+    image_id: str,
+    texts: list[str],
+    *,
+    query_per_text: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[NDArray[np.bool_]] | None]:
     logger.debug(
         f"Requesting with model={session.model_name!r}, "
         f"image={(image.shape, image.dtype)}, texts={texts!r}"
     )
     t_start: float = time.time()
-    response: osam.types.GenerateResponse = session.run(
-        image=image,
-        image_id=image_id,
-        texts=texts,
-    )
 
-    num_annotations: int = len(response.annotations)
+    annotations: list[osam.types.Annotation] = []
+    if query_per_text:
+        for text in texts:
+            response_i: osam.types.GenerateResponse = session.run(
+                image=image,
+                image_id=f"{image_id}:{text}",
+                texts=[text],
+            )
+            annotations.extend(response_i.annotations)
+    else:
+        response: osam.types.GenerateResponse = session.run(
+            image=image,
+            image_id=image_id,
+            texts=texts,
+        )
+        annotations = list(response.annotations)
+
+    num_annotations: int = len(annotations)
     logger.debug(
         f"Response: num_annotations={num_annotations}, "
         f"elapsed_time={time.time() - t_start:.3f} [s]"
@@ -37,7 +66,7 @@ def get_bboxes_from_texts(
     boxes: NDArray[np.float32] = np.empty((num_annotations, 4), dtype=np.float32)
     scores: NDArray[np.float32] = np.empty((num_annotations,), dtype=np.float32)
     labels: NDArray[np.int32] = np.empty((num_annotations,), dtype=np.int32)
-    for i, annotation in enumerate(response.annotations):
+    for i, annotation in enumerate(annotations):
         if annotation.bounding_box is None:
             raise ValueError("Bounding box is missing in the annotation.")
         if annotation.text not in texts:
@@ -54,9 +83,9 @@ def get_bboxes_from_texts(
         labels[i] = texts.index(annotation.text)
 
     masks: list[NDArray[np.bool_]] | None = None
-    if response.annotations and response.annotations[0].mask is not None:
+    if annotations and annotations[0].mask is not None:
         masks = []
-        for annotation in response.annotations:
+        for annotation in annotations:
             assert annotation.mask is not None
             masks.append(annotation.mask)
 

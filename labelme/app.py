@@ -34,7 +34,9 @@ from PyQt5.QtWidgets import QMessageBox
 from labelme import __appname__
 from labelme import __version__
 from labelme._automation import bbox_from_text
+from labelme._automation import bbox_from_text_sam31
 from labelme._automation._osam_session import OsamSession
+from labelme._automation._sam31_session import Sam31Session
 from labelme._label_file import LabelFile
 from labelme._label_file import LabelFileError
 from labelme._label_file import ShapeDict
@@ -170,6 +172,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _config: dict
 
     _text_osam_session: OsamSession | None = None
+    _text_sam31_session: Sam31Session | None = None
     _is_changed: bool = False
     _copied_shapes: list[Shape]
     _zoom_mode: _ZoomMode
@@ -263,7 +266,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ai_annotation.setEnabled(False)
 
         self._ai_text = AiTextToAnnotationWidget(
-            on_submit=self._submit_ai_prompt, parent=self
+            on_submit=self._submit_ai_prompt,
+            on_submit_all=self._submit_ai_prompt_all,
+            on_submit_range=self._submit_ai_prompt_range,
+            parent=self,
         )
         self._ai_text.setEnabled(False)
 
@@ -1234,25 +1240,59 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.warning("Unsupported createMode={!r}", create_mode)
             return
 
-        texts = self._ai_text.get_text_prompt().split(",")
+        texts: list[str] = [
+            text.strip() for text in self._ai_text.get_text_prompt().split(",")
+        ]
+        texts = [text for text in texts if text]
+        if not texts:
+            self.show_status_message(self.tr("AI prompt is empty"), delay=3000)
+            return
 
         model_name: str = self._ai_text.get_model_name()
-        model_type = osam.apis.get_model_type_by_name(model_name)
-        if not (_is_already_downloaded := model_type.get_size() is not None):
-            if not download_ai_model(model_name=model_name, parent=self):
-                return
-        if (
-            self._text_osam_session is None
-            or self._text_osam_session.model_name != model_name
-        ):
-            self._text_osam_session = OsamSession(model_name=model_name)
+        image_array: NDArray[np.uint8] = utils.img_qt_to_arr(self._image)[:, :, :3]
+        image_id: str = str(hash(self._image_path))
 
-        boxes, scores, labels, masks = bbox_from_text.get_bboxes_from_texts(
-            session=self._text_osam_session,
-            image=utils.img_qt_to_arr(self._image)[:, :, :3],
-            image_id=str(hash(self._image_path)),
-            texts=texts,
-        )
+        try:
+            if model_name == "sam3.1:latest":
+                if (
+                    self._text_sam31_session is None
+                    or self._text_sam31_session.model_name != model_name
+                ):
+                    self._text_sam31_session = Sam31Session(model_name=model_name)
+
+                boxes, scores, labels, masks = bbox_from_text_sam31.get_bboxes_from_texts(
+                    session=self._text_sam31_session,
+                    image=image_array,
+                    image_id=image_id,
+                    texts=texts,
+                    min_score=self._ai_text.get_score_threshold(),
+                )
+            else:
+                model_type = osam.apis.get_model_type_by_name(model_name)
+                if not (_is_already_downloaded := model_type.get_size() is not None):
+                    if not download_ai_model(model_name=model_name, parent=self):
+                        return
+                if (
+                    self._text_osam_session is None
+                    or self._text_osam_session.model_name != model_name
+                ):
+                    self._text_osam_session = OsamSession(model_name=model_name)
+
+                query_per_text: bool = model_name == "sam3:latest"
+                boxes, scores, labels, masks = bbox_from_text.get_bboxes_from_texts_with_mode(
+                    session=self._text_osam_session,
+                    image=image_array,
+                    image_id=image_id,
+                    texts=texts,
+                    query_per_text=query_per_text,
+                )
+        except Exception as e:
+            logger.exception("AI text-to-annotation failed")
+            self.errorMessage(
+                self.tr("AI Inference Error"),
+                self.tr("<p><b>%s</b></p>") % str(e),
+            )
+            return
 
         SCORE_FOR_EXISTING_SHAPE: float = 1.01
         for shape in self._canvas_widgets.canvas.shapes:
@@ -1299,6 +1339,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self._canvas_widgets.canvas.storeShapes()
         self._load_shapes(shapes, replace=False)
         self.setDirty()
+
+    def _submit_ai_prompt_all(self, _: bool) -> None:
+        if not self.imageList:
+            self.show_status_message(self.tr("Open a folder first"), delay=3000)
+            return
+
+        previous_row: int = self._docks.file_list.currentRow()
+        total_images: int = self._docks.file_list.count()
+        processed: int = 0
+        failed: int = 0
+
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for row in range(total_images):
+                self._docks.file_list.setCurrentRow(row)
+                self._docks.file_list.repaint()
+                QtWidgets.QApplication.processEvents()
+
+                self._submit_ai_prompt(False)
+
+                if self._image_path is None:
+                    failed += 1
+                    continue
+
+                label_path = self._get_label_path(image_or_label_path=self._image_path)
+                if not self.saveLabels(label_path=label_path):
+                    failed += 1
+                    continue
+
+                self.setClean()
+                processed += 1
+
+            self.show_status_message(
+                self.tr("Run All complete: %d/%d images, %d failed")
+                % (processed, total_images, failed),
+                delay=6000,
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            if previous_row >= 0 and previous_row < self._docks.file_list.count():
+                self._docks.file_list.setCurrentRow(previous_row)
+                self._docks.file_list.repaint()
+
+    def _submit_ai_prompt_range(self, _: bool) -> None:
+        if not self.imageList:
+            self.show_status_message(self.tr("Open a folder first"), delay=3000)
+            return
+
+        count: int = self._ai_text.get_range_count()
+        total_images: int = self._docks.file_list.count()
+        start_row: int = self._docks.file_list.currentRow()
+        if start_row < 0:
+            start_row = 0
+
+        end_row: int = min(start_row + count, total_images)
+
+        previous_row: int = self._docks.file_list.currentRow()
+        processed: int = 0
+        failed: int = 0
+
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for row in range(start_row, end_row):
+                self._docks.file_list.setCurrentRow(row)
+                self._docks.file_list.repaint()
+                QtWidgets.QApplication.processEvents()
+
+                self._submit_ai_prompt(False)
+
+                if self._image_path is None:
+                    failed += 1
+                    continue
+
+                label_path = self._get_label_path(image_or_label_path=self._image_path)
+                if not self.saveLabels(label_path=label_path):
+                    failed += 1
+                    continue
+
+                self.setClean()
+                processed += 1
+
+            self.show_status_message(
+                self.tr("Range complete: %d/%d images, %d failed")
+                % (processed, end_row - start_row, failed),
+                delay=6000,
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            if previous_row >= 0 and previous_row < self._docks.file_list.count():
+                self._docks.file_list.setCurrentRow(previous_row)
+                self._docks.file_list.repaint()
 
     def resetState(self) -> None:
         self._docks.label_list.clear()

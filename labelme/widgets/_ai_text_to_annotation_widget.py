@@ -11,6 +11,7 @@ from ._info_button import InfoButton
 
 class AiTextToAnnotationWidget(QtWidgets.QWidget):
     _available_models: list[tuple[str, str]] = [
+        ("sam3.1:latest", "SAM3.1 (smart)"),
         ("sam3:latest", "SAM3 (smart)"),
         ("yoloworld:latest", "YOLO-World (fast)"),
     ]
@@ -22,17 +23,25 @@ class AiTextToAnnotationWidget(QtWidgets.QWidget):
     _model_combo: QtWidgets.QComboBox
     _score_spinbox: QtWidgets.QDoubleSpinBox
     _iou_spinbox: QtWidgets.QDoubleSpinBox
+    _range_spinbox: QtWidgets.QSpinBox
     _body: QtWidgets.QWidget
 
     def __init__(
         self,
         on_submit: Callable[[bool], None],
+        on_submit_all: Callable[[bool], None],
+        on_submit_range: Callable[[bool], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent=parent)
-        self._init_ui(on_submit)
+        self._init_ui(on_submit, on_submit_all, on_submit_range)
 
-    def _init_ui(self, on_submit: Callable[[bool], None]) -> None:
+    def _init_ui(
+        self,
+        on_submit: Callable[[bool], None],
+        on_submit_all: Callable[[bool], None],
+        on_submit_range: Callable[[bool], None],
+    ) -> None:
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
@@ -72,6 +81,29 @@ class AiTextToAnnotationWidget(QtWidgets.QWidget):
         run_button.setCursor(QtCore.Qt.PointingHandCursor)
         run_button.clicked.connect(on_submit)
         grid.addWidget(run_button, 0, 1)
+
+        run_all_button = QtWidgets.QToolButton()
+        run_all_button.setText(self.tr("Run All"))
+        run_all_button.setFixedHeight(24)
+        run_all_button.setCursor(QtCore.Qt.PointingHandCursor)
+        run_all_button.clicked.connect(on_submit_all)
+        grid.addWidget(run_all_button, 0, 2)
+
+        range_button = QtWidgets.QToolButton()
+        range_button.setText(self.tr("Range"))
+        range_button.setFixedHeight(24)
+        range_button.setCursor(QtCore.Qt.PointingHandCursor)
+        range_button.clicked.connect(on_submit_range)
+        grid.addWidget(range_button, 0, 3)
+
+        self._range_spinbox = range_spinbox = QtWidgets.QSpinBox()
+        range_spinbox.setStyleSheet("font-size: 10px;")
+        range_spinbox.setFixedHeight(24)
+        range_spinbox.setRange(1, 999999)
+        range_spinbox.setValue(10)
+        range_spinbox.setPrefix(self.tr("N="))
+        range_spinbox.setToolTip(self.tr("Number of images for Range run"))
+        grid.addWidget(range_spinbox, 0, 4)
 
         settings_layout = QtWidgets.QHBoxLayout()
         settings_layout.setContentsMargins(0, 0, 0, 0)
@@ -115,12 +147,12 @@ class AiTextToAnnotationWidget(QtWidgets.QWidget):
         iou_spinbox.setValue(self._default_iou_threshold)
         settings_layout.addWidget(iou_spinbox)
 
-        grid.addLayout(settings_layout, 1, 0, 1, 2)
+        grid.addLayout(settings_layout, 1, 0, 1, 5)
 
         body_layout.addLayout(grid)
         layout.addWidget(body)
 
-        self.setMaximumWidth(320)
+        self.setMaximumWidth(560)
 
     def get_text_prompt(self) -> str:
         return self._text_input.text()
@@ -133,6 +165,9 @@ class AiTextToAnnotationWidget(QtWidgets.QWidget):
 
     def get_iou_threshold(self) -> float:
         return self._iou_spinbox.value()
+
+    def get_range_count(self) -> int:
+        return self._range_spinbox.value()
 
     def setEnabled(self, a0: bool) -> None:
         self._body.setEnabled(a0)
